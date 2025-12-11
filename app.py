@@ -30,41 +30,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .customer-info {
-        background-color: #f0f8ff;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid #1f77b4;
-        margin-bottom: 1rem;
-    }
-    .tool-call {
-        background-color: #fff3cd;
-        padding: 0.5rem;
-        border-radius: 5px;
-        font-size: 0.85rem;
-        margin: 0.5rem 0;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 
 # Initialize session state
@@ -96,163 +61,25 @@ is_verified = verification_service.is_verified(CUSTOMER_INFO['id'])
 
 
 # Header
-st.markdown('<div class="main-header">🔒 Music Store Customer Support</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">AI-powered assistant with SMS verification</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🔒 Music Store</div>', unsafe_allow_html=True)
 
 
 # Sidebar
 with st.sidebar:
-    st.header("👤 Current Customer")
-    st.markdown(f"""
-    <div class="customer-info">
-        <strong>Name:</strong> {CUSTOMER_INFO['full_name']}<br>
-        <strong>Customer ID:</strong> {CUSTOMER_INFO['id']}<br>
-        <strong>Email:</strong> {CUSTOMER_INFO['email']}<br>
-        <strong>Phone:</strong> {CUSTOMER_INFO['phone']}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Verification Status
-    st.header("🔐 Verification Status")
-    if is_verified:
-        st.markdown("""
-        <div style="background-color: #d4edda; padding: 1rem; border-radius: 10px; 
-                    border-left: 4px solid #28a745; color: #155724; margin-bottom: 1rem;">
-            ✅ VERIFIED<br>
-            <small>You can update account information</small>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div style="background-color: #fff3cd; padding: 1rem; border-radius: 10px; 
-                    border-left: 4px solid #ffc107; color: #856404; margin-bottom: 1rem;">
-            🔒 NOT VERIFIED<br>
-            <small>Verification required for account changes</small>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.header("💡 What Can I Help With?")
-    st.markdown("""
-    **Browse & View (No Verification):**
-    - View account details
-    - Check order history
-    - Browse music catalog
-    - Search songs & artists
-    - 🎵 Find songs by lyrics!
-    - 🎥 Watch music videos
-    
-    **Purchase Music:**
-    - 💳 Buy individual tracks
-    - 📦 View purchase history
-    - ✅ Check if you own a track
-    
-    **Secure Updates (Requires SMS):**
-    - 🔒 Change email address
-    - 🔒 Update mailing address
-    
-    *SMS verification required for account changes*
-    """)
-    
-    st.header("🎯 Example Questions")
-    
-    st.subheader("📊 Information")
-    regular_questions = [
-        "Show me my account details",
-        "What's my purchase history?",
-        "Find Rock music",
-    ]
-    for question in regular_questions:
-        if st.button(question, key=f"reg_{question}"):
-            st.session_state.user_input = question
-            st.rerun()
-    
-    st.subheader("🎵 Lyrics Search")
-    lyrics_questions = [
-        "I heard a song that goes 'can't you see'",
-        "Find the song with lyrics 'I will always love you'",
-    ]
-    for question in lyrics_questions:
-        if st.button(question, key=f"lyr_{question}"):
-            st.session_state.user_input = question
-            st.rerun()
-    
-    st.subheader("💳 Purchase Music")
-    purchase_questions = [
-        "I want to buy a track",
-        "Show my recent purchases",
-        "What tracks have I purchased?",
-    ]
-    for question in purchase_questions:
-        if st.button(question, key=f"pur_{question}"):
-            st.session_state.user_input = question
-            st.rerun()
-    
-    st.subheader("🔒 Secure Changes")
-    secure_questions = [
-        "Change my email address",
-        "Update my mailing address",
-    ]
-    for question in secure_questions:
-        if st.button(question, key=f"sec_{question}"):
-            st.session_state.user_input = question
-            st.rerun()
-    
-    st.divider()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🗑️ Clear Chat", type="secondary"):
-            st.session_state.messages = []
-            st.session_state.show_greeting = True
-            st.session_state.pending_interrupt = None  # Clear any pending interrupts
-            import uuid
-            # Create a new thread_id for the new conversation
-            st.session_state.thread_id = {"configurable": {"thread_id": f"thread-{uuid.uuid4().hex[:8]}"}}
-            st.rerun()
-    
-    with col2:
-        if st.button("🔓 Clear Verification", type="secondary"):
-            verification_service.clear_verification(CUSTOMER_INFO['id'])
-            st.success("Verification cleared!")
-            st.rerun()
-    
-    st.divider()
-    st.caption("🔒 Secured with Twilio SMS")
-    st.caption("Built with LangGraph + LangChain")
+    if st.button("🗑️ Clear Chat", type="secondary", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.show_greeting = True
+        st.session_state.pending_interrupt = None  # Clear any pending interrupts
+        import uuid
+        # Create a new thread_id for the new conversation
+        st.session_state.thread_id = {"configurable": {"thread_id": f"thread-{uuid.uuid4().hex[:8]}"}}
+        st.rerun()
 
 
 # Main chat interface
 chat_container = st.container()
 
 with chat_container:
-    # Show welcome greeting on first load
-    if st.session_state.show_greeting and len(st.session_state.messages) == 0:
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                    padding: 2rem; 
-                    border-radius: 15px; 
-                    color: white; 
-                    margin-bottom: 2rem;
-                    box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h2 style="margin: 0 0 1rem 0; color: white;">👋 Welcome, {CUSTOMER_INFO['first_name']}!</h2>
-            <p style="margin: 0; font-size: 1.1rem; line-height: 1.6;">
-                I'm your secure music store assistant. I can help you with:
-            </p>
-            <ul style="margin: 0.5rem 0 0 1.5rem; font-size: 1rem;">
-                <li>Viewing your account and purchase history</li>
-                <li>Finding new music - songs, albums, and artists</li>
-                <li>🎵 <strong>Finding songs by lyrics</strong> - just tell me what you remember!</li>
-                <li>🎥 <strong>Watching music videos</strong> - preview songs before buying</li>
-                <li>💳 <strong>Purchasing tracks</strong> - buy individual songs instantly</li>
-                <li>🔒 <strong>Securely updating</strong> your email or address (requires SMS verification)</li>
-                <li>Answering any questions about your orders</li>
-            </ul>
-            <p style="margin: 1rem 0 0 0; font-size: 0.95rem; opacity: 0.9;">
-                🔐 <strong>Security Note:</strong> Account changes require SMS verification to your phone: {CUSTOMER_INFO['phone']}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.session_state.show_greeting = False
     
     # Verification code input form (if code was just sent)
     if len(st.session_state.messages) > 0:
@@ -295,10 +122,12 @@ with chat_container:
                                 
                                 # Create beautiful header
                                 st.markdown(f"""
-                                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                <div style="background: linear-gradient(135deg, rgba(44,75,75,0.95) 0%, rgba(45,79,79,0.90) 60%, rgba(31,58,58,0.95) 100%); 
                                             padding: 1rem; 
-                                            border-radius: 15px 15px 0 0; 
-                                            margin-top: 1.5rem;">
+                                            border-radius: 20px 20px 0 0; 
+                                            margin-top: 1.5rem;
+                                            border: 1px solid rgba(255,255,255,0.12);
+                                            border-bottom: none;">
                                     <h3 style="margin: 0; color: white; font-size: 1.2rem;">🎥 {video_title}</h3>
                                     <p style="margin: 0.5rem 0 0 0; color: rgba(255,255,255,0.9); font-size: 0.9rem;">
                                         📺 {channel_title}
@@ -357,11 +186,19 @@ with chat_container:
             if isinstance(payload, dict) and payload.get("track_name"):
                 # Payment purchase approval - show it nicely
                 st.markdown(f"""
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                <div style="background: linear-gradient(135deg, rgba(44,75,75,0.95) 0%, rgba(45,79,79,0.90) 55%, rgba(31,58,58,0.95) 100%); 
                             padding: 1.5rem; 
-                            border-radius: 15px; 
+                            border-radius: 20px; 
                             color: white; 
-                            margin: 1rem 0;">
+                            margin: 1rem 0;
+                            border: 1px solid rgba(255,255,255,0.12);
+                            box-shadow: 0 22px 70px rgba(0,0,0,0.45);
+                            position: relative;
+                            overflow: hidden;">
+                    <div style="position: absolute; top: -30px; right: -30px; width: 200px; height: 200px; 
+                                background: radial-gradient(circle, rgba(211,182,198,0.12) 0%, rgba(167,196,223,0.10) 50%, transparent 70%);
+                                pointer-events: none;"></div>
+                    <div style="position: relative; z-index: 1;">
                     <h3 style="margin: 0 0 1rem 0; color: white;">💰 Purchase Approval Required</h3>
                     <p style="margin: 0.5rem 0; font-size: 1.1rem;">
                         <strong>Track:</strong> {payload.get('track_name', 'Unknown')}<br>
@@ -371,6 +208,7 @@ with chat_container:
                     <p style="margin: 1rem 0 0 0; font-size: 1rem; opacity: 0.9;">
                         {payload.get('message', 'Approve this purchase?')}
                     </p>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -644,10 +482,12 @@ if user_input:
                                     
                                     # Create beautiful header
                                     st.markdown(f"""
-                                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                    <div style="background: linear-gradient(135deg, #0A1020 0%, #071526 60%, #031819 100%); 
                                                 padding: 1rem; 
                                                 border-radius: 15px 15px 0 0; 
-                                                margin-top: 1.5rem;">
+                                                margin-top: 1.5rem;
+                                                border: 1px solid rgba(255,255,255,0.10);
+                                                border-bottom: none;">
                                         <h3 style="margin: 0; color: white; font-size: 1.2rem;">🎥 {video_title}</h3>
                                         <p style="margin: 0.5rem 0 0 0; color: rgba(255,255,255,0.9); font-size: 0.9rem;">
                                             📺 {channel_title}
@@ -701,27 +541,3 @@ if user_input:
                 st.session_state.pending_interrupt = None
     
     st.rerun()
-
-
-# Footer
-st.divider()
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Messages", len([m for m in st.session_state.messages if isinstance(m, HumanMessage)]))
-with col2:
-    st.metric("Responses", len([m for m in st.session_state.messages if isinstance(m, AIMessage) and m.content]))
-with col3:
-    status = "✅ Verified" if is_verified else "🔒 Not Verified"
-    st.metric("Security", status)
-with col4:
-    api_key_set = "✅" if os.getenv("OPENAI_API_KEY") else "❌"
-    st.metric("API Key", api_key_set)
-
-# Debug panel (collapsible)
-with st.expander("🔍 Debug Logs", expanded=False):
-    st.code(f"""
-Thread ID: {st.session_state.thread_id}
-Pending Interrupt: {st.session_state.pending_interrupt}
-Messages Count: {len(st.session_state.messages)}
-Last Message Type: {type(st.session_state.messages[-1]).__name__ if st.session_state.messages else 'None'}
-    """, language="text")
