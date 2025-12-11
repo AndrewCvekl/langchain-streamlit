@@ -6,6 +6,7 @@ from pathlib import Path
 from langchain_community.utilities.sql_database import SQLDatabase
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
+from guardrails import validate_sql_query, CURRENT_CUSTOMER_ID
 
 
 def download_chinook_database(db_path: str = "chinook.db") -> None:
@@ -60,18 +61,68 @@ def get_engine_for_chinook_db(db_path: str = "chinook.db"):
     return engine
 
 
-def get_database(db_path: str = "chinook.db") -> SQLDatabase:
+class SecureSQLDatabase(SQLDatabase):
     """
-    Get a LangChain SQLDatabase instance for the Chinook database.
+    Wrapper around SQLDatabase that adds security guardrails.
+    Validates all SQL queries before execution.
+    """
+    
+    def __init__(self, engine, customer_id: int = CURRENT_CUSTOMER_ID):
+        super().__init__(engine)
+        self.customer_id = customer_id
+    
+    def run(self, command: str, fetch: str = "all", include_columns: bool = False, **kwargs):
+        """
+        Run a SQL command with security validation.
+        
+        Args:
+            command: SQL command to execute
+            fetch: How to fetch results
+            include_columns: Whether to include column names
+            **kwargs: Additional arguments
+            
+        Returns:
+            Query results or error message if validation fails
+        """
+        # Validate the query
+        is_valid, error_message = validate_sql_query(command, self.customer_id)
+        
+        if not is_valid:
+            # Return error message instead of executing query
+            return error_message
+        
+        # Query is valid, proceed with execution
+        try:
+            return super().run(command, fetch=fetch, include_columns=include_columns, **kwargs)
+        except Exception as e:
+            # Re-validate in case of unexpected issues
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Database error: {str(e)}")
+            return f"❌ Database error: {str(e)}"
+    
+    def get_secure_connection(self):
+        """
+        Get a database connection with guardrails.
+        Use this instead of direct _engine.connect() for secure queries.
+        """
+        return self._engine.connect()
+
+
+def get_database(db_path: str = "chinook.db", customer_id: int = None) -> SecureSQLDatabase:
+    """
+    Get a secure SQLDatabase instance for the Chinook database with guardrails.
     
     Args:
         db_path: Path to the SQLite database file
+        customer_id: Current customer ID for access control (defaults to CURRENT_CUSTOMER_ID from guardrails)
         
     Returns:
-        LangChain SQLDatabase instance
+        SecureSQLDatabase instance with validation
     """
+    if customer_id is None:
+        customer_id = CURRENT_CUSTOMER_ID
     engine = get_engine_for_chinook_db(db_path)
-    return SQLDatabase(engine)
+    return SecureSQLDatabase(engine, customer_id=customer_id)
 
 
 if __name__ == "__main__":

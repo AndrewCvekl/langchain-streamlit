@@ -6,6 +6,7 @@ These tools handle sensitive account updates with proper security.
 from langchain_core.tools import tool
 from database import get_database
 from verification import get_verification_service
+from guardrails import execute_secure_query
 
 # Initialize database
 db = get_database()
@@ -28,10 +29,9 @@ def request_phone_verification():
     """
     # Get customer's phone number - db.run returns a string, not a list
     try:
-        # Use db._execute instead for proper result format
-        from sqlalchemy import text
-        with db._engine.connect() as conn:
-            result = conn.execute(text(f"SELECT Phone FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+        # Use secure query execution with guardrails
+        with db.get_secure_connection() as conn:
+            result = execute_secure_query(conn, f"SELECT Phone FROM Customer WHERE CustomerId = {CUSTOMER_ID}", CUSTOMER_ID)
             row = result.fetchone()
             
         if not row:
@@ -65,9 +65,8 @@ def verify_phone_code(verification_code: str):
     """
     # Get customer's phone number
     try:
-        from sqlalchemy import text
-        with db._engine.connect() as conn:
-            result = conn.execute(text(f"SELECT Phone FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+        with db.get_secure_connection() as conn:
+            result = execute_secure_query(conn, f"SELECT Phone FROM Customer WHERE CustomerId = {CUSTOMER_ID}", CUSTOMER_ID)
             row = result.fetchone()
             
         if not row:
@@ -130,20 +129,33 @@ def update_email_address(new_email: str):
         return "❌ Invalid email format. Please provide a valid email address."
     
     try:
-        from sqlalchemy import text
-        
         # Get current email
-        with db._engine.connect() as conn:
-            result = conn.execute(text(f"SELECT Email FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+        with db.get_secure_connection() as conn:
+            result = execute_secure_query(
+                conn, 
+                "SELECT Email FROM Customer WHERE CustomerId = :customer_id",
+                CUSTOMER_ID,
+                {"customer_id": CUSTOMER_ID}
+            )
             row = result.fetchone()
             current_email = row[0] if row else "unknown"
         
-            # Update email in database
-            conn.execute(text(f"UPDATE Customer SET Email = '{new_email}' WHERE CustomerId = {CUSTOMER_ID}"))
+            # Update email in database (validation ensures customer ID filter)
+            execute_secure_query(
+                conn,
+                "UPDATE Customer SET Email = :new_email WHERE CustomerId = :customer_id",
+                CUSTOMER_ID,
+                {"new_email": new_email, "customer_id": CUSTOMER_ID}
+            )
             conn.commit()
             
             # Verify the update
-            result = conn.execute(text(f"SELECT Email FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+            result = execute_secure_query(
+                conn,
+                "SELECT Email FROM Customer WHERE CustomerId = :customer_id",
+                CUSTOMER_ID,
+                {"customer_id": CUSTOMER_ID}
+            )
             row = result.fetchone()
             updated_email = row[0] if row else None
         
@@ -175,11 +187,14 @@ def update_mailing_address(street_address: str, city: str, state: str = None, po
         return "❌ Security check required. You must verify your phone number before updating your address. Please request a verification code first."
     
     try:
-        from sqlalchemy import text
-        
         # Get current address
-        with db._engine.connect() as conn:
-            result = conn.execute(text(f"SELECT Address, City, State, PostalCode, Country FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+        with db.get_secure_connection() as conn:
+            result = execute_secure_query(
+                conn,
+                "SELECT Address, City, State, PostalCode, Country FROM Customer WHERE CustomerId = :customer_id",
+                CUSTOMER_ID,
+                {"customer_id": CUSTOMER_ID}
+            )
             row = result.fetchone()
             current_address = {
                 'Address': row[0] if row else '',
@@ -189,22 +204,40 @@ def update_mailing_address(street_address: str, city: str, state: str = None, po
                 'Country': row[4] if row else ''
             }
         
-        # Build update query
-        updates = [f"Address = '{street_address}'", f"City = '{city}'"]
-        
-        if state:
-            updates.append(f"State = '{state}'")
-        if postal_code:
-            updates.append(f"PostalCode = '{postal_code}'")
-        if country:
-            updates.append(f"Country = '{country}'")
-        
-            update_sql = f"UPDATE Customer SET {', '.join(updates)} WHERE CustomerId = {CUSTOMER_ID};"
-            conn.execute(text(update_sql))
+            # Build update statement with parameters (avoid SQL injection)
+            params = {
+                "customer_id": CUSTOMER_ID,
+                "address": street_address,
+                "city": city,
+                "state": state,
+                "postal_code": postal_code,
+                "country": country,
+            }
+
+            execute_secure_query(
+                conn,
+                """
+                UPDATE Customer
+                SET
+                    Address = :address,
+                    City = :city,
+                    State = COALESCE(:state, State),
+                    PostalCode = COALESCE(:postal_code, PostalCode),
+                    Country = COALESCE(:country, Country)
+                WHERE CustomerId = :customer_id
+                """,
+                CUSTOMER_ID,
+                params
+            )
             conn.commit()
             
             # Verify the update
-            result = conn.execute(text(f"SELECT Address, City, State, PostalCode, Country FROM Customer WHERE CustomerId = {CUSTOMER_ID}"))
+            result = execute_secure_query(
+                conn,
+                "SELECT Address, City, State, PostalCode, Country FROM Customer WHERE CustomerId = :customer_id",
+                CUSTOMER_ID,
+                {"customer_id": CUSTOMER_ID}
+            )
             row = result.fetchone()
             new_address = {
                 'Address': row[0] if row else '',

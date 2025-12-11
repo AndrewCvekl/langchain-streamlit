@@ -1,11 +1,16 @@
-"""Main entry point for the customer support chatbot."""
+"""Main entry point for the customer support chatbot (terminal).
 
-import asyncio
+This runner supports LangGraph human-in-the-loop interrupts.
+"""
+
+import uuid
+
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import START, END
+from langgraph.types import Command
 
-from graph_with_verification import create_agent_with_verification
+from graph_with_verification import create_agent_with_memory
+from tracing import setup_langsmith_tracing
 
 
 def print_separator():
@@ -13,77 +18,77 @@ def print_separator():
     print("\n" + "=" * 60 + "\n")
 
 
-async def run_chatbot():
-    """
-    Run the interactive chatbot in the terminal.
-    """
-    # Load environment variables
-    load_dotenv()
-    
-    print("=" * 60)
-    print("🎵 Welcome to the Music Store Customer Support Bot! 🎵")
-    print("=" * 60)
-    print("\nI can help you with:")
-    print("  • Finding music, albums, and artists")
-    print("  • Looking up your customer information")
-    print("\nType 'quit', 'q', or 'exit' to end the conversation.")
-    print_separator()
-    
-    # Create the graph
-    graph = create_agent_with_verification()
-    
-    # Conversation history
-    history = []
-    
-    while True:
-        # Get user input
-        user_input = input("You: ").strip()
-        
-        if not user_input:
-            continue
-            
-        if user_input.lower() in {'q', 'quit', 'exit'}:
-            print("\nThank you for chatting! Have a great day! 👋")
-            break
-        
-        # Add user message to history
-        history.append(HumanMessage(content=user_input))
-        
-        print("\nBot: ", end="", flush=True)
-        
-        # Stream the response
-        response_content = ""
-        try:
-            async for output in graph.astream(history):
-                if END in output or START in output:
-                    continue
-                
-                # Get the latest message from the output
-                for key, value in output.items():
-                    if isinstance(value, AIMessage):
-                        if value.content:
-                            response_content = value.content
-        except Exception as e:
-            print(f"\n\nError: {str(e)}")
-            print("Please try again.")
-            history.pop()  # Remove the last user message
-            print_separator()
-            continue
-        
-        # Print the final response
-        if response_content:
-            print(response_content)
-            history.append(AIMessage(content=response_content))
-        else:
-            # If there's no text content, the bot might have made a tool call
-            print("I'm processing your request...")
-        
-        print_separator()
+def _interrupt_payload(interrupts):
+    if not interrupts:
+        return None
+    first = interrupts[0]
+    payload = getattr(first, "value", None)
+    if payload is None and isinstance(first, dict):
+        payload = first.get("value")
+    return payload if payload is not None else first
 
 
 def main():
-    """Main function."""
-    asyncio.run(run_chatbot())
+    """Run the interactive chatbot in the terminal."""
+
+    load_dotenv()
+    
+    # Set up LangSmith tracing
+    setup_langsmith_tracing()
+
+    print("=" * 60)
+    print("🎵 Welcome to the Music Store Customer Support Bot! 🎵")
+    print("=" * 60)
+    print("\nType 'quit', 'q', or 'exit' to end the conversation.")
+    print_separator()
+
+    graph = create_agent_with_memory()
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+
+    messages = []
+
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input:
+            continue
+        if user_input.lower() in {"q", "quit", "exit"}:
+            print("\nThank you for chatting! Have a great day! 👋")
+            break
+
+        messages.append(HumanMessage(content=user_input))
+
+        result = graph.invoke({"messages": messages}, config=config)
+
+        # HITL approval loop
+        while isinstance(result, dict) and result.get("__interrupt__"):
+            payload = _interrupt_payload(result["__interrupt__"])
+            print("\n⏸️ Approval required for a sensitive action.")
+
+            if isinstance(payload, dict) and payload.get("tool_calls"):
+                for tc in payload["tool_calls"]:
+                    print(f"- Tool: {tc.get('name')} Args: {tc.get('args', {})}")
+            else:
+                print(payload)
+
+            decision = input("Approve? (y/n): ").strip().lower()
+            resume = {"decision": "approve"} if decision in {"y", "yes"} else {"decision": "reject"}
+            result = graph.invoke(Command(resume=resume), config=config)
+
+        # Update local message history from graph state
+        if isinstance(result, dict) and "messages" in result:
+            messages = result["messages"]
+
+        # Print last assistant message with content
+        final = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and msg.content:
+                final = msg
+                break
+
+        print("\nBot:", final.content if final else "(no text response)")
+        print_separator()
 
 
 if __name__ == "__main__":
