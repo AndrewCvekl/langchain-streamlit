@@ -71,6 +71,7 @@ def initiate_track_purchase(track_id: int, track_name: str, track_price: float) 
     """
     Step 1: Create a payment intent for purchasing a track.
     This starts the payment process and generates a payment ID.
+    NO INTERRUPT - approval handled at graph level (LangGraph 2025 best practice).
     
     Args:
         track_id: The ID of the track to purchase
@@ -81,7 +82,7 @@ def initiate_track_purchase(track_id: int, track_name: str, track_price: float) 
         Payment intent details with payment ID
     """
     try:
-        # Create payment intent
+        # Create payment intent (no interrupt - handled by graph)
         intent = payment_service.create_payment_intent(
             amount=track_price,
             customer_id=DEFAULT_CUSTOMER_ID,
@@ -100,7 +101,7 @@ def initiate_track_purchase(track_id: int, track_name: str, track_price: float) 
 🎵 Track: {track_name} (ID: {track_id})
 📊 Status: {intent.status}
 
-Ready to process payment. Use payment ID: {intent.payment_intent_id}
+🎯 NEXT STEP: Call confirm_and_process_payment with payment_intent_id='{intent.payment_intent_id}' to complete the purchase.
 """
     except Exception as e:
         return f"❌ Error creating payment intent: {str(e)}"
@@ -130,8 +131,7 @@ def confirm_and_process_payment(payment_intent_id: str) -> str:
 ✅ Status: {intent.status}
 📅 Date: {intent.updated_at.strftime('%Y-%m-%d %H:%M:%S')}
 
-Payment processed successfully! Now creating your invoice...
-Use this payment ID to create the invoice: {intent.payment_intent_id}
+🎯 NEXT STEP: Call create_invoice_from_payment with payment_intent_id='{intent.payment_intent_id}' to save the purchase and create the receipt.
 """
         else:
             return f"""❌ PAYMENT FAILED

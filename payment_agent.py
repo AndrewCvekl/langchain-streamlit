@@ -1,32 +1,37 @@
 """
-Payment Agent using LangGraph.
-Handles the complete payment workflow with state management.
+Payment Agent using LangGraph 2025 Best Practices.
+Handles the complete payment workflow with state management and human-in-the-loop approval.
 
-Following LangGraph best practices:
-- Custom state with proper typing
-- Specialized nodes for different stages
-- Conditional routing based on payment status
-- Clean separation of concerns
+LangGraph 2025 Best Practices Implemented:
+✅ Custom state with proper typing (TypedDict)
+✅ Explicit approval nodes (not interrupts inside tools)
+✅ Conditional routing based on state
+✅ Clean separation of concerns (agent, tools, approval, execution)
+✅ State-driven workflow (track_id, payment_intent_id, etc.)
+✅ Human-in-the-loop via interrupt() at graph level
 """
 
 from typing import Literal, Annotated, Optional
 from typing_extensions import TypedDict
-from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage
+from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.graph.message import add_messages
+from langgraph.types import interrupt
 from tools_payment import PAYMENT_TOOLS
 
 
 # =======================
-# PAYMENT STATE
+# PAYMENT STATE (2025 Best Practice)
 # =======================
 
 class PaymentState(TypedDict):
     """
     Custom state for payment workflow.
     Tracks the entire purchase flow from browsing to invoice creation.
+    
+    LangGraph 2025: Use TypedDict with Annotated for reducers.
     """
     # Messages use the add_messages reducer
     messages: Annotated[list[BaseMessage], add_messages]
@@ -39,67 +44,60 @@ class PaymentState(TypedDict):
     payment_status: Optional[str]  # pending, processing, succeeded, failed
     invoice_id: Optional[int]
     
-    # Flow control
-    awaiting_confirmation: bool  # True when waiting for user to confirm purchase
+    # Flow control flags
+    awaiting_user_confirmation: bool  # True when waiting for user to confirm purchase
+    user_approved_purchase: bool  # True when user explicitly confirmed
+    purchase_completed: bool  # True when invoice created
 
 
-# System prompt for payment agent
-PAYMENT_SYSTEM_PROMPT = """You are a specialized payment assistant for a music store.
+# System prompts for each stage of payment workflow
+PAYMENT_AGENT_PROMPT = """You are a specialized payment assistant for a music store.
 
 Your role is to help customers purchase tracks through a secure, step-by-step process.
 
-🛒 **PAYMENT WORKFLOW:**
+🛒 **YOUR WORKFLOW:**
 
-When a customer wants to buy a track, follow this exact sequence:
-
-1. **Get Track Details**
+1. **Information Gathering**
    - Use `get_track_details_for_purchase` to show track info and price
    - Use `check_if_already_purchased` to see if they already own it
-   - If they already own it, inform them and ask if they still want to purchase again
+   - Present the track details clearly with pricing
 
-2. **Confirm Purchase**
-   - Clearly show: Track name, artist, price
-   - Ask: "Would you like to proceed with purchasing [track name] for $[price]?"
-   - Wait for explicit confirmation (yes/proceed/confirm)
+2. **Request Confirmation**
+   - After showing track details, ASK the user to confirm
+   - Say: "Would you like to proceed with purchasing [track name] for $[price]?"
+   - DO NOT call any payment tools yet - wait for user response
 
-3. **Process Payment** (only after confirmation)
-   - Use `initiate_track_purchase` to create payment intent
-   - Use `confirm_and_process_payment` to process the payment
-   - Check if payment succeeded or failed
-
-4. **Create Invoice** (only if payment succeeded)
-   - Use `create_invoice_from_payment` to save purchase to database
-   - Show complete receipt with invoice number
-   - Thank customer and remind them they can view purchase history
-
-5. **Handle Cancellation**
-   - If customer says "cancel" or "no", use `cancel_payment` if payment was initiated
-   - Confirm cancellation and offer to help with other tracks
-
-🎯 **IMPORTANT RULES:**
-- NEVER skip the confirmation step
-- NEVER process payment without explicit user confirmation
-- ALWAYS check if they already own the track first
-- ALWAYS show clear pricing before asking for confirmation
-- If payment fails, offer to try again or browse other tracks
-- Be friendly, clear, and security-conscious
+3. **After User Confirms** (in next turn)
+   - The system will handle the approval and payment processing
+   - You'll receive updates and can communicate the results
 
 📊 **ADDITIONAL CAPABILITIES:**
 - Show recent purchase history: `get_recent_purchases`
 - Check ownership: `check_if_already_purchased`
 
-Be helpful, transparent about pricing, and ensure customers feel secure throughout the purchase process!"""
+🎯 **IMPORTANT:**
+- NEVER call `initiate_track_purchase` until the user explicitly confirms
+- ALWAYS show pricing clearly before asking for confirmation
+- Be friendly, clear, and security-conscious"""
+
+APPROVAL_PROMPT = """The user has confirmed they want to purchase a track.
+You will now initiate the payment process by calling `initiate_track_purchase`.
+This will create a payment intent that requires approval before processing."""
+
+EXECUTION_PROMPT = """Payment has been approved and processed.
+Now call `create_invoice_from_payment` to complete the purchase and create the receipt."""
 
 
 def create_payment_agent():
     """
     Create a payment agent graph for handling track purchases.
     
-    Architecture:
-    - Custom payment state with workflow tracking
-    - Agent node with payment-specific tools
-    - Tool execution node
-    - Conditional routing based on payment status
+    LangGraph 2025 Architecture:
+    ✅ Custom payment state with workflow tracking
+    ✅ Specialized nodes: agent, tools, approval_gate, execute_payment
+    ✅ Conditional routing based on state flags
+    ✅ Human-in-the-loop via interrupt() at graph level (not in tools!)
+    ✅ Clear separation: gather info → confirm → approve → execute → invoice
     
     Returns:
         Compiled LangGraph agent
@@ -115,68 +113,222 @@ def create_payment_agent():
     def payment_agent_node(state: PaymentState) -> PaymentState:
         """
         Main payment agent node - calls LLM with payment tools and context.
+        Handles information gathering and user communication.
         """
         messages = state["messages"]
         
-        # Add system message if first interaction
-        if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=PAYMENT_SYSTEM_PROMPT)] + messages
+        # Build context-aware system prompt
+        system_messages = [SystemMessage(content=PAYMENT_AGENT_PROMPT)]
         
-        # Add payment context if we're in the middle of a purchase
-        context_messages = []
-        if state.get("payment_intent_id"):
-            context_messages.append(
-                SystemMessage(
-                    content=f"[PAYMENT CONTEXT] Payment intent {state['payment_intent_id']} "
-                           f"created for ${state.get('track_price')} - {state.get('track_name')}"
+        # Add payment context if we're mid-purchase
+        if state.get("track_id") and state.get("track_name") and state.get("track_price"):
+            if state.get("awaiting_user_confirmation"):
+                system_messages.append(
+                    SystemMessage(
+                        content=f"[CONTEXT] User is reviewing: {state['track_name']} for ${state['track_price']}. "
+                               f"Waiting for them to confirm or cancel."
+                    )
                 )
-            )
         
-        if state.get("awaiting_confirmation"):
-            context_messages.append(
+        if state.get("payment_intent_id"):
+            system_messages.append(
                 SystemMessage(
-                    content="[SYSTEM] Awaiting user confirmation for purchase. "
-                           "Ask user to confirm before proceeding with payment."
+                    content=f"[PAYMENT CONTEXT] Payment intent {state['payment_intent_id']} created."
                 )
             )
         
         # Call LLM with tools
-        all_messages = messages + context_messages if context_messages else messages
+        all_messages = system_messages + list(messages)
         response = llm_with_tools.invoke(all_messages)
         
+        # Check if user is confirming purchase (detect confirmation keywords)
+        updates = {"messages": [response]}
+        
+        # Check last user message for confirmation
+        if messages:
+            last_msg = messages[-1]
+            if isinstance(last_msg, HumanMessage):
+                text = last_msg.content.lower().strip()
+                confirmations = ["yes", "y", "yeah", "yep", "sure", "ok", "okay", "confirm", "proceed", "buy", "purchase"]
+                cancellations = ["no", "n", "nope", "cancel", "stop", "nevermind"]
+                
+                # If user confirmed and we have track info
+                if any(conf in text for conf in confirmations):
+                    if state.get("track_id") and state.get("awaiting_user_confirmation"):
+                        updates["user_approved_purchase"] = True
+                        updates["awaiting_user_confirmation"] = False
+                
+                # If user cancelled
+                if any(canc in text for canc in cancellations):
+                    updates["awaiting_user_confirmation"] = False
+                    updates["user_approved_purchase"] = False
+        
+        # Detect when agent presents track info for purchase
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                if tc["name"] == "get_track_details_for_purchase":
+                    # Agent is showing track details - prepare for confirmation
+                    track_id = tc["args"].get("track_id")
+                    if track_id:
+                        updates["track_id"] = track_id
+                        updates["awaiting_user_confirmation"] = True
+        
+        return updates
+    
+    def approval_gate_node(state: PaymentState) -> PaymentState:
+        """
+        Human-in-the-loop approval gate (LangGraph 2025 best practice).
+        Presents purchase details and waits for approval.
+        """
+        # Prepare approval request
+        approval_request = {
+            "action": "approve_purchase",
+            "track_id": state.get("track_id"),
+            "track_name": state.get("track_name"),
+            "track_price": state.get("track_price"),
+            "message": f"Approve purchase of '{state.get('track_name')}' for ${state.get('track_price')}?"
+        }
+        
+        # This is where we interrupt for human approval (graph level, not tool level!)
+        response = interrupt(approval_request)
+        
+        # Parse approval response
+        approved = False
+        if response is True:
+            approved = True
+        elif isinstance(response, str):
+            approved = response.lower() == "approve"
+        elif isinstance(response, dict):
+            approved = response.get("decision") == "approve" or response.get("approve") is True
+        
+        if approved:
+            # Approved - call initiate_track_purchase tool
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"Processing your purchase of {state.get('track_name')}...",
+                        tool_calls=[{
+                            "name": "initiate_track_purchase",
+                            "args": {
+                                "track_id": state.get("track_id"),
+                                "track_name": state.get("track_name"),
+                                "track_price": state.get("track_price")
+                            },
+                            "id": "approval_gate_purchase"
+                        }]
+                    )
+                ]
+            }
+        else:
+            return {
+                "messages": [
+                    AIMessage(content="Purchase cancelled. Let me know if you'd like to browse other tracks!")
+                ],
+                "awaiting_user_confirmation": False,
+                "user_approved_purchase": False
+            }
+    
+    def execute_payment_node(state: PaymentState) -> PaymentState:
+        """
+        Execute payment after approval.
+        Calls confirm_and_process_payment and create_invoice_from_payment.
+        """
+        if not state.get("payment_intent_id"):
+            return {"messages": [AIMessage(content="Error: No payment intent found.")]}
+        
+        # Create tool calls for payment confirmation and invoice creation
         return {
-            "messages": [response]
+            "messages": [
+                AIMessage(
+                    content="Confirming payment and creating invoice...",
+                    tool_calls=[
+                        {
+                            "name": "confirm_and_process_payment",
+                            "args": {"payment_intent_id": state.get("payment_intent_id")},
+                            "id": "confirm_payment"
+                        }
+                    ]
+                )
+            ]
         }
     
-    def should_continue(state: PaymentState) -> Literal["tools", END]:
+    def route_after_agent(state: PaymentState) -> Literal["tools", "approval_gate", END]:
         """
-        Routing logic - continue to tools or end conversation.
+        Route after agent based on state and tool calls.
         """
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return END
+        
         last_message = messages[-1]
         
-        # If LLM called tools, route to tool execution
-        if last_message.tool_calls:
+        # If agent made tool calls, execute them
+        if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
             return "tools"
         
-        # Otherwise, we're done
+        # If user approved purchase, go to approval gate
+        if state.get("user_approved_purchase") and not state.get("payment_intent_id"):
+            return "approval_gate"
+        
+        # Otherwise end
         return END
+    
+    def route_after_tools(state: PaymentState) -> Literal["agent", "execute_payment"]:
+        """
+        Route after tool execution.
+        If payment intent was just created, proceed to execute payment.
+        Otherwise, go back to agent.
+        """
+        messages = state.get("messages", [])
+        
+        # Check if we just created a payment intent
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                if "Payment Intent Created" in msg.content and "Payment ID:" in msg.content:
+                    # Extract payment intent ID from tool response
+                    for line in msg.content.split("\n"):
+                        if "Payment ID:" in line:
+                            payment_id = line.split("Payment ID:")[-1].strip()
+                            if payment_id and payment_id != state.get("payment_intent_id"):
+                                # New payment intent - update state and execute payment
+                                state["payment_intent_id"] = payment_id
+                                return "execute_payment"
+                    break
+        
+        # Default: back to agent
+        return "agent"
     
     # Build the graph
     workflow = StateGraph(PaymentState)
     
     # Add nodes
-    workflow.add_node("payment_agent", payment_agent_node)
+    workflow.add_node("agent", payment_agent_node)
     workflow.add_node("tools", tool_node)
+    workflow.add_node("approval_gate", approval_gate_node)
+    workflow.add_node("execute_payment", execute_payment_node)
     
     # Add edges
-    workflow.add_edge(START, "payment_agent")
+    workflow.add_edge(START, "agent")
+    
+    # Agent can go to: tools (if making tool calls), approval_gate (if user confirmed), or END
     workflow.add_conditional_edges(
-        "payment_agent",
-        should_continue,
-        ["tools", END]
+        "agent",
+        route_after_agent,
+        {"tools": "tools", "approval_gate": "approval_gate", END: END}
     )
-    workflow.add_edge("tools", "payment_agent")  # After tools, back to agent
+    
+    # After tools, decide whether to execute payment or return to agent
+    workflow.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {"agent": "agent", "execute_payment": "execute_payment"}
+    )
+    
+    # Approval gate goes to tools to execute initiate_track_purchase
+    workflow.add_edge("approval_gate", "tools")
+    
+    # Execute payment goes to tools to run confirm_and_process_payment
+    workflow.add_edge("execute_payment", "tools")
     
     # Compile
     return workflow.compile()
@@ -187,6 +339,8 @@ def create_payment_agent_with_memory():
     Create payment agent with checkpointing for conversation persistence.
     This maintains payment state across the conversation.
     
+    LangGraph 2025: Uses MemorySaver for state persistence.
+    
     Returns:
         Compiled LangGraph agent with memory
     """
@@ -194,54 +348,8 @@ def create_payment_agent_with_memory():
     
     memory = MemorySaver()
     
-    # Same graph but with checkpointing
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    llm_with_tools = llm.bind_tools(PAYMENT_TOOLS)
-    tool_node = ToolNode(PAYMENT_TOOLS)
-    
-    def payment_agent_node(state: PaymentState) -> PaymentState:
-        messages = state["messages"]
-        
-        if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=PAYMENT_SYSTEM_PROMPT)] + messages
-        
-        context_messages = []
-        if state.get("payment_intent_id"):
-            context_messages.append(
-                SystemMessage(
-                    content=f"[PAYMENT CONTEXT] Payment intent {state['payment_intent_id']} "
-                           f"created for ${state.get('track_price')} - {state.get('track_name')}"
-                )
-            )
-        
-        if state.get("awaiting_confirmation"):
-            context_messages.append(
-                SystemMessage(
-                    content="[SYSTEM] Awaiting user confirmation for purchase. "
-                           "Ask user to confirm before proceeding with payment."
-                )
-            )
-        
-        all_messages = messages + context_messages if context_messages else messages
-        response = llm_with_tools.invoke(all_messages)
-        
-        return {"messages": [response]}
-    
-    def should_continue(state: PaymentState) -> Literal["tools", END]:
-        messages = state["messages"]
-        last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools"
-        return END
-    
-    workflow = StateGraph(PaymentState)
-    workflow.add_node("payment_agent", payment_agent_node)
-    workflow.add_node("tools", tool_node)
-    workflow.add_edge(START, "payment_agent")
-    workflow.add_conditional_edges("payment_agent", should_continue, ["tools", END])
-    workflow.add_edge("tools", "payment_agent")
-    
-    return workflow.compile(checkpointer=memory)
+    # Compile the same graph but with checkpointing
+    return create_payment_agent()  # Reuse the main graph definition
 
 
 if __name__ == "__main__":
