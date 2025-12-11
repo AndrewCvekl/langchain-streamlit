@@ -528,15 +528,21 @@ def search_youtube_video(song_title: str, artist_name: str) -> str:
         return f"Error searching YouTube: {str(e)}"
 
 
-# Export all tools
-ALL_TOOLS = [
-    # Customer account tools
+#
+# Tool group exports (clean separation for specialist agents)
+#
+
+# Read-only account / order history (non-sensitive)
+ACCOUNT_VIEW_TOOLS = [
     get_customer_account,
     get_invoice_history,
     get_purchased_tracks,
     get_spending_summary,
     get_invoice_details,
-    # Music catalog tools
+]
+
+# Music catalog browsing (non-sensitive)
+CATALOG_TOOLS = [
     search_tracks,
     search_artists,
     get_artist_albums,
@@ -545,8 +551,14 @@ ALL_TOOLS = [
     get_tracks_by_genre,
     get_popular_tracks,
     get_track_price,
-    # Lyrics search tools
+]
+
+# External APIs for “lyrics → song → video” demo
+LYRICS_TOOLS = [
     search_song_by_lyrics,
     check_song_in_catalogue,
     search_youtube_video,
 ]
+
+# Backwards-compatible export used by older code paths
+ALL_TOOLS = ACCOUNT_VIEW_TOOLS + CATALOG_TOOLS + LYRICS_TOOLS

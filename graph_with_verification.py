@@ -1,7 +1,7 @@
 """sql-support-bot support agent graph.
 
 High-signal takehome features:
-- Clean cognitive architecture: triage router -> specialist agent -> tools loop
+- Clean cognitive architecture: router -> specialist agent -> tools loop
 - Human-in-the-loop approvals for sensitive operations via LangGraph interrupts
 - Customer data isolation via server-side customer context + verification gates
 
@@ -11,15 +11,20 @@ This file exports factory functions used by Streamlit (`app.py`) and Studio (`ag
 from __future__ import annotations
 
 from typing import Annotated, Literal, TypedDict
+import logging
 
 from pydantic import BaseModel, Field
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.types import interrupt
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 from tools_v2 import ACCOUNT_VIEW_TOOLS, CATALOG_TOOLS, LYRICS_TOOLS
 from tools_account import ALL_ACCOUNT_TOOLS
@@ -38,7 +43,7 @@ CUSTOMER_INFO = {
 }
 
 
-Area = Literal["general", "catalog", "account", "payment"]
+Area = Literal["general", "music", "account", "payment"]
 
 
 class SupportState(TypedDict, total=False):
@@ -48,18 +53,20 @@ class SupportState(TypedDict, total=False):
 
     `active_area` tracks which specialist is currently handling the turn.
     `is_verified` mirrors the server-side verification store (Twilio Verify).
+    `approval_status` tracks whether approval gate approved or rejected the operation.
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
     active_area: Area
     is_verified: bool
+    approval_status: Literal["approved", "rejected", None]
 
 
-class TriageDecision(BaseModel):
+class RouterDecision(BaseModel):
     """Router output."""
 
     area: Area = Field(
-        description="Which specialist should handle the user request: general, catalog, account, payment"
+        description="Which specialist should handle the user request: general, music, account, payment"
     )
 
 
@@ -67,10 +74,10 @@ class TriageDecision(BaseModel):
 # Prompts (small + focused)
 # -----------------------------
 
-TRIAGE_PROMPT = """You are a router for a music store support bot.
+ROUTER_PROMPT = """You are a router for a music store support bot.
 
 Pick the best area:
-- catalog: music discovery, catalog browsing, genres, artists, albums, track lookup, lyrics search, video preview
+- music: music discovery, catalog browsing, genres, artists, albums, track lookup, lyrics search, video preview
 - account: viewing account + orders, verification, updating email/address (secure)
 - payment: buying a track, payment workflow, receipts/invoices
 - general: greetings, store policy questions, anything else
@@ -80,13 +87,13 @@ Return ONLY the area."""
 GENERAL_PROMPT = f"""You are a helpful customer support assistant for a music store.
 
 The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}).
-Be concise and helpful. If the request is about account, payments, or the catalog, ask a clarifying question.
+Be concise and helpful. If the request is about account, payments, or music, ask a clarifying question.
 """
 
-CATALOG_PROMPT = f"""You are a music catalog specialist for a music store.
+MUSIC_PROMPT = f"""You are a music specialist for a music store.
 
 The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}).
-You can browse/search the catalog and do lyrics -> song -> video flows.
+You can browse/search the music catalog and do lyrics -> song -> video flows.
 When you show options, keep it to a short shortlist and ask what they prefer.
 """
 
@@ -156,25 +163,30 @@ Be friendly, transparent, and make customers feel secure!
 
 
 # Tool groupings per specialist
-CATALOG_TOOLSET = CATALOG_TOOLS + LYRICS_TOOLS
+MUSIC_TOOLSET = CATALOG_TOOLS + LYRICS_TOOLS
 ACCOUNT_TOOLSET = ACCOUNT_VIEW_TOOLS + ALL_ACCOUNT_TOOLS
 PAYMENT_TOOLSET = PAYMENT_TOOLS
 
 
-# Note: HITL approval is now handled via interrupt() inside sensitive tools (best practice)
+# Sensitive tools that require human approval
+SENSITIVE_TOOLS = {
+    "initiate_track_purchase",  # Payment operations
+    "update_email_address",     # Account changes
+    "update_mailing_address",   # Account changes
+}
 
 
 def _llm(model: str = "gpt-4o") -> ChatOpenAI:
     return ChatOpenAI(model=model, temperature=0)
 
 
-def _triage_node(state: SupportState) -> SupportState:
+def _router_node(state: SupportState) -> SupportState:
     messages = state.get("messages", [])
 
     # Sticky routing: if we're already in a specialist flow and the user replies
     # with a short confirmation / continuation, keep the current area.
     prev_area = state.get("active_area")
-    if prev_area in {"catalog", "account", "payment"} and messages:
+    if prev_area in {"music", "account", "payment"} and messages:
         last = messages[-1]
         if isinstance(last, HumanMessage) and isinstance(last.content, str):
             text = last.content.strip().lower()
@@ -200,8 +212,8 @@ def _triage_node(state: SupportState) -> SupportState:
             if text in confirmations or text.startswith("my verification code is"):
                 return {"active_area": prev_area}
 
-    triage = _llm().with_structured_output(TriageDecision)
-    decision = triage.invoke([SystemMessage(content=TRIAGE_PROMPT)] + list(messages))
+    router = _llm().with_structured_output(RouterDecision)
+    decision = router.invoke([SystemMessage(content=ROUTER_PROMPT)] + list(messages))
 
     # `decision` may be a Pydantic model or dict depending on underlying implementation
     area = decision.area if hasattr(decision, "area") else decision["area"]
@@ -215,11 +227,11 @@ def _general_agent_node(state: SupportState) -> SupportState:
     return {"messages": [response], "active_area": "general"}
 
 
-def _catalog_agent_node(state: SupportState) -> SupportState:
+def _music_agent_node(state: SupportState) -> SupportState:
     messages = state.get("messages", [])
-    llm_with_tools = _llm().bind_tools(CATALOG_TOOLSET)
-    response = llm_with_tools.invoke([SystemMessage(content=CATALOG_PROMPT)] + list(messages))
-    return {"messages": [response], "active_area": "catalog"}
+    llm_with_tools = _llm().bind_tools(MUSIC_TOOLSET)
+    response = llm_with_tools.invoke([SystemMessage(content=MUSIC_PROMPT)] + list(messages))
+    return {"messages": [response], "active_area": "music"}
 
 
 def _account_agent_node(state: SupportState) -> SupportState:
@@ -314,21 +326,171 @@ def _payment_agent_node(state: SupportState) -> SupportState:
     return {"messages": [response], "active_area": "payment"}
 
 
-def _route_after_triage(state: SupportState) -> Area:
+def _route_after_router(state: SupportState) -> Area:
     return state.get("active_area", "general")
 
 
-def _agent_should_continue(state: SupportState) -> Literal["tools", END]:
-    """Route agent to tools if it made tool calls, otherwise end."""
+def _agent_should_continue(state: SupportState) -> Literal["approval_gate", "tools", END]:
+    """Route agent to approval gate if sensitive tools, tools if safe tools, otherwise end."""
     messages = state.get("messages", [])
     if not messages:
         return END
     last = messages[-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        # Check if any tool call is sensitive
+        for tool_call in last.tool_calls:
+            if tool_call.get("name") in SENSITIVE_TOOLS:
+                return "approval_gate"
         return "tools"
     return END
 
 
+def _approval_gate_node(state: SupportState) -> SupportState:
+    """
+    Human-in-the-loop approval gate for sensitive operations.
+    Interrupts execution and waits for human approval before proceeding.
+    
+    IMPORTANT: Do NOT wrap interrupt() in try/except - it raises a special
+    exception that must propagate to LangGraph runtime to work correctly.
+    
+    NOTE: When resumed, this node restarts from the beginning per LangGraph docs.
+    The interrupt() call will return the resume value.
+    """
+    logger.info(f"[APPROVAL_GATE] Node called")
+    messages = state.get("messages", [])
+    logger.info(f"[APPROVAL_GATE] Messages count: {len(messages)}")
+    
+    if not messages:
+        logger.info(f"[APPROVAL_GATE] No messages, returning approved")
+        return {"messages": [], "approval_status": "approved"}
+    
+    last_message = messages[-1]
+    logger.info(f"[APPROVAL_GATE] Last message type: {type(last_message)}")
+    logger.info(f"[APPROVAL_GATE] Is AIMessage: {isinstance(last_message, AIMessage)}")
+    
+    if not isinstance(last_message, AIMessage) or not getattr(last_message, "tool_calls", None):
+        logger.info(f"[APPROVAL_GATE] No tool calls, returning approved")
+        return {"messages": [], "approval_status": "approved"}
+    
+    tool_calls = getattr(last_message, "tool_calls", [])
+    logger.info(f"[APPROVAL_GATE] Tool calls found: {len(tool_calls)}")
+    
+    # Extract sensitive tool calls
+    sensitive_calls = [
+        tc for tc in tool_calls 
+        if tc.get("name") in SENSITIVE_TOOLS
+    ]
+    
+    logger.info(f"[APPROVAL_GATE] Sensitive tool calls: {len(sensitive_calls)}")
+    
+    if not sensitive_calls:
+        # No sensitive calls, pass through
+        logger.info(f"[APPROVAL_GATE] No sensitive calls, returning approved")
+        return {"messages": [], "approval_status": "approved"}
+    
+    # Prepare approval request (must be JSON-serializable)
+    # Format it nicely for the UI
+    approval_request = {
+        "action": "approve_sensitive_operation",
+        "tool_calls": sensitive_calls,
+        "message": f"Approval required for {len(sensitive_calls)} sensitive operation(s)"
+    }
+    
+    # Add specific details for payment operations
+    for tc in sensitive_calls:
+        if tc.get("name") == "initiate_track_purchase":
+            args = tc.get("args", {})
+            approval_request["track_id"] = args.get("track_id")
+            approval_request["track_name"] = args.get("track_name")
+            approval_request["track_price"] = args.get("track_price")
+            approval_request["message"] = f"Approve purchase of '{args.get('track_name')}' for ${args.get('track_price')}?"
+            break
+    
+    # Interrupt and wait for approval
+    # CRITICAL: Do NOT wrap this in try/except - interrupt() raises a special
+    # exception that LangGraph catches to pause execution. Catching it prevents
+    # the interrupt from working.
+    # NOTE: When resumed, this node restarts from the beginning, and interrupt()
+    # returns the resume value (True/False from Command(resume=...))
+    logger.info(f"[APPROVAL_GATE] Calling interrupt with request: {approval_request}")
+    response = interrupt(approval_request)
+    logger.info(f"[APPROVAL_GATE] Interrupt resumed with response: {response} (type: {type(response)})")
+    
+    # When resumed, the response value is passed back here
+    # According to docs, we should accept True/False for simple approval/rejection
+    # But also handle dict format for flexibility
+    approved = False
+    if response is True:
+        approved = True
+    elif response is False:
+        approved = False
+    elif isinstance(response, str):
+        approved = response.lower() in ("approve", "yes", "y", "true")
+    elif isinstance(response, dict):
+        decision = response.get("decision", "").lower()
+        approved = (
+            decision in ("approve", "yes", "y", "true") 
+            or response.get("approve") is True
+            or response.get("approved") is True
+        )
+    
+    logger.info(f"[APPROVAL_GATE] Approved: {approved}")
+    
+    if approved:
+        # Approved - pass through to tools (tool calls are already in state)
+        logger.info(f"[APPROVAL_GATE] Returning approved status")
+        return {"messages": [], "approval_status": "approved"}
+    else:
+        # Rejected - cancel the operation
+        # IMPORTANT: We must add ToolMessages for each rejected tool call
+        # OpenAI API requires that every tool_call_id has a corresponding ToolMessage
+        logger.info(f"[APPROVAL_GATE] Returning rejected status with cancellation message")
+        
+        # Create ToolMessages for each rejected tool call
+        tool_messages = []
+        for tc in sensitive_calls:
+            tool_id = tc.get("id", "")
+            tool_name = tc.get("name", "unknown_tool")
+            tool_message = ToolMessage(
+                content=f"❌ Operation cancelled: {tool_name} was not approved by the user.",
+                tool_call_id=tool_id
+            )
+            tool_messages.append(tool_message)
+            logger.info(f"[APPROVAL_GATE] Created cancellation ToolMessage for tool_call_id: {tool_id}")
+        
+        # Add a cancellation message from the assistant
+        cancellation_message = AIMessage(
+            content="❌ Operation cancelled. The sensitive action was not approved. Is there anything else I can help you with?"
+        )
+        
+        # Return both the tool messages (required by OpenAI) and the cancellation message
+        return {
+            "messages": tool_messages + [cancellation_message],
+            "approval_status": "rejected"
+        }
+
+
+def _route_after_approval(state: SupportState) -> Literal["music_tools", "account_tools", "payment_tools", END]:
+    """Route after approval gate based on approval status and active area."""
+    approval_status = state.get("approval_status")
+    area = state.get("active_area", "general")
+    logger.info(f"[ROUTE_AFTER_APPROVAL] approval_status={approval_status}, area={area}")
+    
+    if approval_status == "rejected":
+        logger.info(f"[ROUTE_AFTER_APPROVAL] Rejected, routing to END")
+        return END
+    
+    # Approved - route to appropriate tools based on area
+    logger.info(f"[ROUTE_AFTER_APPROVAL] Approved, routing to {area}_tools")
+    if area == "music":
+        return "music_tools"
+    elif area == "account":
+        return "account_tools"
+    elif area == "payment":
+        return "payment_tools"
+    else:
+        logger.warning(f"[ROUTE_AFTER_APPROVAL] Unknown area {area}, routing to END")
+        return END
 
 
 def _build_graph(*, with_checkpointer=False):
@@ -337,25 +499,26 @@ def _build_graph(*, with_checkpointer=False):
     builder = StateGraph(SupportState)
 
     # Nodes
-    builder.add_node("triage", _triage_node)
+    builder.add_node("router", _router_node)
 
     builder.add_node("general_agent", _general_agent_node)
-    builder.add_node("catalog_agent", _catalog_agent_node)
+    builder.add_node("music_agent", _music_agent_node)
     builder.add_node("account_agent", _account_agent_node)
     builder.add_node("payment_agent", _payment_agent_node)
 
-    builder.add_node("catalog_tools", ToolNode(CATALOG_TOOLSET))
+    builder.add_node("music_tools", ToolNode(MUSIC_TOOLSET))
     builder.add_node("account_tools", ToolNode(ACCOUNT_TOOLSET))
     builder.add_node("payment_tools", ToolNode(PAYMENT_TOOLSET))
+    builder.add_node("approval_gate", _approval_gate_node)
 
     # Flow
-    builder.add_edge(START, "triage")
+    builder.add_edge(START, "router")
     builder.add_conditional_edges(
-        "triage",
-        _route_after_triage,
+        "router",
+        _route_after_router,
         {
             "general": "general_agent",
-            "catalog": "catalog_agent",
+            "music": "music_agent",
             "account": "account_agent",
             "payment": "payment_agent",
         },
@@ -364,25 +527,37 @@ def _build_graph(*, with_checkpointer=False):
     # General agent never calls tools (it just routes or responds)
     builder.add_edge("general_agent", END)
     
-    # Specialist agents can call tools or end
+    # Specialist agents can call tools (via approval gate if sensitive), or end
     builder.add_conditional_edges(
-        "catalog_agent",
+        "music_agent",
         _agent_should_continue,
-        {"tools": "catalog_tools", END: END},
+        {"tools": "music_tools", "approval_gate": "approval_gate", END: END},
     )
     builder.add_conditional_edges(
         "account_agent",
         _agent_should_continue,
-        {"tools": "account_tools", END: END},
+        {"tools": "account_tools", "approval_gate": "approval_gate", END: END},
     )
     builder.add_conditional_edges(
         "payment_agent",
         _agent_should_continue,
-        {"tools": "payment_tools", END: END},
+        {"tools": "payment_tools", "approval_gate": "approval_gate", END: END},
+    )
+    
+    # Approval gate routes: if approved, go to tools; if rejected, end
+    builder.add_conditional_edges(
+        "approval_gate",
+        _route_after_approval,
+        {
+            "music_tools": "music_tools",
+            "account_tools": "account_tools",
+            "payment_tools": "payment_tools",
+            END: END,
+        },
     )
 
     # Tools -> back to the same agent (continue tool/agent loop)
-    builder.add_edge("catalog_tools", "catalog_agent")
+    builder.add_edge("music_tools", "music_agent")
     builder.add_edge("account_tools", "account_agent")
     builder.add_edge("payment_tools", "payment_agent")
 
