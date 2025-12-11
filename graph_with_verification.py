@@ -12,6 +12,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.graph.message import add_messages
 from tools_v2 import ALL_TOOLS as CATALOG_TOOLS
 from tools_account import ALL_ACCOUNT_TOOLS
+from tools_payment import PAYMENT_TOOLS
 from verification import get_verification_service
 
 
@@ -72,6 +73,7 @@ You can help with:
 5. **Music Catalog**: Search for songs, albums, artists, browse by genre
 6. **Pricing**: Check track prices, album details
 7. **🎵 Lyrics Search**: Find songs by lyrics snippet - see workflow below
+8. **💳 Purchase Tracks**: Buy songs and add them to their collection - see workflow below
 
 🎵 **LYRICS SEARCH WORKFLOW:**
 When a customer provides lyrics (e.g., "I heard a song that went 'can't you see'"):
@@ -85,6 +87,26 @@ When a customer provides lyrics (e.g., "I heard a song that went 'can't you see'
    - If yes: Thank them and say "Thanks! We'll pass this feedback to our team."
    - If no: Offer to help find similar music we do have
 
+💳 **TRACK PURCHASE WORKFLOW:**
+When a customer wants to buy/purchase a track:
+1. Use `get_track_details_for_purchase` to show track info and price
+2. Use `check_if_already_purchased` to see if they already own it
+3. If already owned, inform them but still offer to purchase again if they want
+4. Ask for confirmation: "Would you like to purchase [track name] by [artist] for $[price]?"
+5. If confirmed, use `initiate_track_purchase` to create payment intent
+6. Then use `confirm_and_process_payment` to process the payment
+7. If payment succeeds, use `create_invoice_from_payment` to save to database
+8. Show complete receipt with invoice number
+9. If they say "cancel" or "no", respect their decision
+
+**IMPORTANT PURCHASE RULES:**
+- ALWAYS check if they already own the track first
+- ALWAYS show clear pricing before purchase
+- NEVER skip the confirmation step
+- ALWAYS wait for explicit confirmation (yes/confirm/proceed)
+- If payment fails, offer to try again
+- After successful purchase, show invoice number and thank them
+
 Be friendly, security-conscious, and helpful. Use {CUSTOMER_INFO['first_name']}'s name naturally in responses.
 
 When handling verification:
@@ -95,7 +117,7 @@ When handling verification:
 
 
 # Combine all tools
-ALL_TOOLS = CATALOG_TOOLS + ALL_ACCOUNT_TOOLS
+ALL_TOOLS = CATALOG_TOOLS + ALL_ACCOUNT_TOOLS + PAYMENT_TOOLS
 
 
 def create_agent_with_verification():

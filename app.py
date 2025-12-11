@@ -125,11 +125,16 @@ with st.sidebar:
     - 🎵 Find songs by lyrics!
     - 🎥 Watch music videos
     
+    **Purchase Music:**
+    - 💳 Buy individual tracks
+    - 📦 View purchase history
+    - ✅ Check if you own a track
+    
     **Secure Updates (Requires SMS):**
     - 🔒 Change email address
     - 🔒 Update mailing address
     
-    *SMS verification required for security*
+    *SMS verification required for account changes*
     """)
     
     st.header("🎯 Example Questions")
@@ -152,6 +157,17 @@ with st.sidebar:
     ]
     for question in lyrics_questions:
         if st.button(question, key=f"lyr_{question}"):
+            st.session_state.user_input = question
+            st.rerun()
+    
+    st.subheader("💳 Purchase Music")
+    purchase_questions = [
+        "I want to buy a track",
+        "Show my recent purchases",
+        "What tracks have I purchased?",
+    ]
+    for question in purchase_questions:
+        if st.button(question, key=f"pur_{question}"):
             st.session_state.user_input = question
             st.rerun()
     
@@ -208,6 +224,7 @@ with chat_container:
                 <li>Finding new music - songs, albums, and artists</li>
                 <li>🎵 <strong>Finding songs by lyrics</strong> - just tell me what you remember!</li>
                 <li>🎥 <strong>Watching music videos</strong> - preview songs before buying</li>
+                <li>💳 <strong>Purchasing tracks</strong> - buy individual songs instantly</li>
                 <li>🔒 <strong>Securely updating</strong> your email or address (requires SMS verification)</li>
                 <li>Answering any questions about your orders</li>
             </ul>
