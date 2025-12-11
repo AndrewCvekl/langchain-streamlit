@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 from database import get_database
 from payment_service import get_payment_service, PaymentStatus
 from typing import Optional
+from guardrails import execute_secure_query
 
 # Initialize database and payment service
 db = get_database()
@@ -169,10 +170,11 @@ def create_invoice_from_payment(payment_intent_id: str) -> str:
             return f"❌ Cannot create invoice. Payment status is {intent.status}, not succeeded."
         
         # Get customer billing info
-        from sqlalchemy import text
-        with db._engine.connect() as conn:
-            customer_result = conn.execute(
-                text(f"SELECT Address, City, State, Country, PostalCode FROM Customer WHERE CustomerId = {DEFAULT_CUSTOMER_ID}")
+        with db.get_secure_connection() as conn:
+            customer_result = execute_secure_query(
+                conn,
+                f"SELECT Address, City, State, Country, PostalCode FROM Customer WHERE CustomerId = {DEFAULT_CUSTOMER_ID}",
+                DEFAULT_CUSTOMER_ID
             )
             customer_row = customer_result.fetchone()
             
@@ -184,43 +186,63 @@ def create_invoice_from_payment(payment_intent_id: str) -> str:
             if not track_id:
                 return "❌ Track ID not found in payment metadata."
             
-            # Get next invoice ID
-            max_invoice_result = conn.execute(text("SELECT MAX(InvoiceId) FROM Invoice"))
+            # Get next invoice ID (no customer filter needed for MAX query)
+            max_invoice_result = execute_secure_query(
+                conn,
+                "SELECT MAX(InvoiceId) FROM Invoice",
+                DEFAULT_CUSTOMER_ID
+            )
             max_invoice_id = max_invoice_result.fetchone()[0] or 0
             new_invoice_id = max_invoice_id + 1
             
-            # Create invoice
+            # Create invoice (validation ensures customer ID is set correctly)
             invoice_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            conn.execute(text(f"""
+            execute_secure_query(
+                conn,
+                f"""
                 INSERT INTO Invoice (InvoiceId, CustomerId, InvoiceDate, BillingAddress, BillingCity, 
                                     BillingState, BillingCountry, BillingPostalCode, Total)
                 VALUES ({new_invoice_id}, {DEFAULT_CUSTOMER_ID}, '{invoice_date}', 
                         '{customer_row[0] or ''}', '{customer_row[1] or ''}', 
                         '{customer_row[2] or ''}', '{customer_row[3] or ''}', 
                         '{customer_row[4] or ''}', {intent.amount})
-            """))
+                """,
+                DEFAULT_CUSTOMER_ID
+            )
             
-            # Get next invoice line ID
-            max_line_result = conn.execute(text("SELECT MAX(InvoiceLineId) FROM InvoiceLine"))
+            # Get next invoice line ID (no customer filter needed for MAX query)
+            max_line_result = execute_secure_query(
+                conn,
+                "SELECT MAX(InvoiceLineId) FROM InvoiceLine",
+                DEFAULT_CUSTOMER_ID
+            )
             max_line_id = max_line_result.fetchone()[0] or 0
             new_line_id = max_line_id + 1
             
             # Create invoice line
-            conn.execute(text(f"""
+            execute_secure_query(
+                conn,
+                f"""
                 INSERT INTO InvoiceLine (InvoiceLineId, InvoiceId, TrackId, UnitPrice, Quantity)
                 VALUES ({new_line_id}, {new_invoice_id}, {track_id}, {intent.amount}, 1)
-            """))
+                """,
+                DEFAULT_CUSTOMER_ID
+            )
             
             conn.commit()
             
-            # Get track details for confirmation
-            track_result = conn.execute(text(f"""
+            # Get track details for confirmation (no customer filter needed for Track lookup)
+            track_result = execute_secure_query(
+                conn,
+                f"""
                 SELECT t.Name, ar.Name as Artist, a.Title as Album
                 FROM Track t
                 LEFT JOIN Album a ON t.AlbumId = a.AlbumId
                 LEFT JOIN Artist ar ON a.ArtistId = ar.ArtistId
                 WHERE t.TrackId = {track_id}
-            """))
+                """,
+                DEFAULT_CUSTOMER_ID
+            )
             track_row = track_result.fetchone()
             
             track_name = track_row[0] if track_row else "Unknown"
@@ -332,20 +354,23 @@ def check_if_already_purchased(track_id: int) -> str:
         Whether the track has been purchased or not
     """
     try:
-        from sqlalchemy import text
-        with db._engine.connect() as conn:
-            result = conn.execute(text(f"""
+        with db.get_secure_connection() as conn:
+            result = execute_secure_query(
+                conn,
+                f"""
                 SELECT COUNT(*) as PurchaseCount
                 FROM Invoice i
                 JOIN InvoiceLine il ON i.InvoiceId = il.InvoiceId
                 WHERE i.CustomerId = {DEFAULT_CUSTOMER_ID}
                 AND il.TrackId = {track_id}
-            """))
+                """,
+                DEFAULT_CUSTOMER_ID
+            )
             row = result.fetchone()
             count = row[0] if row else 0
         
         if count > 0:
-            return f"✅ You already own this track! You purchased it {count} time(s)."
+            return f"✅ You already own this track! You purchased it {count} time(s). You don't need to purchase it again."
         else:
             return f"❌ You haven't purchased this track yet. Would you like to buy it?"
     except Exception as e:

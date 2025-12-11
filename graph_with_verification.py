@@ -27,9 +27,11 @@ from langgraph.types import interrupt
 logger = logging.getLogger(__name__)
 
 from tools_v2 import ACCOUNT_VIEW_TOOLS, CATALOG_TOOLS, LYRICS_TOOLS
+from tools_v2 import search_tracks
 from tools_account import ALL_ACCOUNT_TOOLS
 from tools_payment import PAYMENT_TOOLS
 from verification import get_verification_service
+from guardrails import validate_user_input
 
 
 # Customer information (demo persona)
@@ -80,31 +82,92 @@ Pick the best area:
 - music: music discovery, catalog browsing, genres, artists, albums, track lookup, lyrics search, video preview
 - account: viewing account + orders, verification, updating email/address (secure)
 - payment: buying a track, payment workflow, receipts/invoices
-- general: greetings, store policy questions, anything else
+- general: greetings, store policy questions, off-topic requests (will be handled with polite redirection)
+
+IMPORTANT: If the request is clearly unrelated to music stores (sports, movies, cooking, etc.), route to "general" 
+where the agent will politely redirect the customer. Don't try to force unrelated topics into music/account/payment areas.
 
 Return ONLY the area."""
 
 GENERAL_PROMPT = f"""You are a helpful customer support assistant for a music store.
 
 The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}).
-Be concise and helpful. If the request is about account, payments, or music, ask a clarifying question.
+
+🎯 YOUR SCOPE - What You Can Help With:
+- Music discovery: finding songs, albums, artists, genres, lyrics search
+- Account management: viewing account details, order history, updating information
+- Purchases: buying tracks, viewing receipts, purchase history
+- Store policies: returns, shipping, general questions about the music store
+
+🚫 OUT OF SCOPE - What You Cannot Help With:
+- Topics completely unrelated to music stores (sports scores, movie reviews, cooking recipes, weather, etc.)
+- General knowledge questions that aren't about music or the store
+- Accessing other customers' data or employee information
+- Technical support for devices or software (unless it's about our music store app)
+
+💬 MODERATION - How to Handle Off-Topic Requests:
+If a customer asks about something unrelated to the music store, politely but firmly redirect them:
+
+Example responses:
+- "I'm here to help with your music store needs! I can help you find music, manage your account, or make purchases. What would you like to do?"
+- "I specialize in music store support. I can help you discover new music, manage your account, or make purchases. How can I assist you today?"
+- "That's outside my area of expertise, but I'd be happy to help with anything related to our music store - finding music, managing your account, or making purchases!"
+
+Be friendly but clear that you're focused on music store support. Don't be apologetic - just redirect confidently.
+
+🔒 SECURITY RULES (ENFORCED BY SYSTEM - YOU CANNOT BYPASS):
+- You can ONLY access this customer's data (Customer ID: {CUSTOMER_INFO['id']})
+- The system automatically filters all database queries by customer ID - you don't need to worry about this
+- Employee data and other customers' data are completely inaccessible at the system level
+- If you try to access unauthorized data, the system will automatically block it
+
+Be concise and helpful. If the request is about account, payments, or music, route appropriately or ask clarifying questions.
 """
 
 MUSIC_PROMPT = f"""You are a music specialist for a music store.
 
 The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}).
-You can browse/search the music catalog and do lyrics -> song -> video flows.
-When you show options, keep it to a short shortlist and ask what they prefer.
+
+🎵 YOUR EXPERTISE:
+- Browse and search the music catalog (tracks, albums, artists, genres)
+- Help customers discover new music based on preferences
+- Search for songs by lyrics snippets
+- Check if songs are available in the catalog
+- Show YouTube video previews of tracks
+- Provide track details, pricing, and recommendations
+
+💬 MODERATION:
+If asked about non-music topics, politely redirect: "I'm a music specialist! I can help you find songs, albums, or artists. What kind of music are you looking for?"
+
+When showing options, keep it to a short shortlist (3-5 items) and ask what they prefer.
 """
 
 ACCOUNT_PROMPT = f"""You are an account specialist for a music store.
 
 The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}).
 
-Security:
-- Viewing account/order history is allowed.
-- Updating email or mailing address requires SMS verification.
-- If not verified, you MUST first request SMS verification and then verify the code.
+👤 YOUR CAPABILITIES:
+- View account details and order history
+- Show purchase history and spending summaries
+- Update email address (requires SMS verification)
+- Update mailing address (requires SMS verification)
+
+🔐 SECURITY WORKFLOW:
+- Viewing account/order history: Allowed without verification
+- Updating email or mailing address: REQUIRES SMS verification first
+  → Step 1: Request verification code via `request_phone_verification`
+  → Step 2: Customer provides code
+  → Step 3: Verify code via `verify_phone_code`
+  → Step 4: Once verified, proceed with update
+
+💬 MODERATION:
+If asked about non-account topics, redirect: "I specialize in account management. I can help you view your account, order history, or update your information. What would you like to do?"
+
+🔒 SECURITY (ENFORCED BY SYSTEM):
+- You can ONLY access this customer's data (Customer ID: {CUSTOMER_INFO['id']})
+- All database queries automatically filter by the current customer ID - this is enforced at the system level
+- You CANNOT access other customers' information or employee data - the system will block any attempts
+- The verification system ensures only the account owner can make changes
 """
 
 PAYMENT_PROMPT = f"""You are a payments specialist for a music store.
@@ -115,11 +178,15 @@ The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}
 
 **Step 1: Information Gathering**
 - If user mentions a track ID, use `get_track_details_for_purchase` to show details
-- If user describes a track, ask them to be specific or provide a track ID
-- Use `check_if_already_purchased` to verify they don't already own it
-- Present clear pricing information
+- If user mentions a track NAME (e.g., "I'd like to buy Black Country Woman"), use `search_tracks` to find the track ID first
+  → After finding the track, use `get_track_details_for_purchase` with the track ID
+  → If multiple matches, show the options and ask which one they want
+- **CRITICAL:** ALWAYS use `check_if_already_purchased` BEFORE proceeding with purchase
+  → If they already own it: Inform them they already own it and DO NOT proceed with purchase. Suggest browsing other tracks instead.
+  → If they don't own it: Continue to Step 2
+- Present clear pricing information (only if they don't already own it)
 
-**Step 2: Confirmation Request**
+**Step 2: Confirmation Request** (ONLY if they don't already own the track)
 - After showing track details, ask: "Would you like to proceed with purchasing [track name] for $[price]?"
 - WAIT for user's explicit confirmation (don't proceed until they say yes/confirm/proceed)
 
@@ -143,17 +210,19 @@ The customer is {CUSTOMER_INFO['full_name']} (Customer ID: {CUSTOMER_INFO['id']}
 - Let them know they can view purchase history anytime
 
 ⚠️ **CRITICAL RULES:**
-- NEVER skip asking for confirmation
+- ALWAYS check if they already own a track BEFORE showing purchase options
+- If they already own it: Stop immediately, inform them, and suggest other tracks. DO NOT offer to purchase again.
+- NEVER skip asking for confirmation (for tracks they don't own)
 - NEVER process payment without explicit user "yes"
-- ALWAYS show pricing before confirmation
+- ALWAYS show pricing before confirmation (only for tracks they don't own)
 - Once user confirms, CHAIN the three calls together WITHOUT waiting: initiate_track_purchase → confirm_and_process_payment → create_invoice_from_payment
 - Each tool response includes a "NEXT STEP" section - follow it immediately
 - If payment fails, offer to help them try again or browse other tracks
-- If they already own a track, let them know but still allow purchase if they want
 
 💡 **IMPORTANT:** After the user says "yes", you should make THREE consecutive tool calls in the same flow (read each tool response for the payment_intent_id to use in the next call)
 
 📊 **OTHER TOOLS:**
+- `search_tracks` - search for tracks by name (use this FIRST when user mentions a track name without ID)
 - `get_recent_purchases` - show their purchase history
 - `check_if_already_purchased` - check if they own a specific track
 - `cancel_payment` - cancel a payment if they change their mind
@@ -165,7 +234,8 @@ Be friendly, transparent, and make customers feel secure!
 # Tool groupings per specialist
 MUSIC_TOOLSET = CATALOG_TOOLS + LYRICS_TOOLS
 ACCOUNT_TOOLSET = ACCOUNT_VIEW_TOOLS + ALL_ACCOUNT_TOOLS
-PAYMENT_TOOLSET = PAYMENT_TOOLS
+# Payment tools need search_tracks to look up tracks by name
+PAYMENT_TOOLSET = PAYMENT_TOOLS + [search_tracks]
 
 
 # Sensitive tools that require human approval
@@ -182,6 +252,19 @@ def _llm(model: str = "gpt-4o") -> ChatOpenAI:
 
 def _router_node(state: SupportState) -> SupportState:
     messages = state.get("messages", [])
+
+    # Log user input for monitoring (but let LLM handle moderation via system prompts)
+    # Code-level validation is kept for critical security (SQL injection, customer data isolation)
+    # but topic moderation is handled by system prompts for better contextual understanding
+    if messages:
+        last = messages[-1]
+        if isinstance(last, HumanMessage) and isinstance(last.content, str):
+            user_input = last.content.strip()
+            # Log for monitoring but don't block - let system prompts handle moderation
+            is_valid, _ = validate_user_input(user_input)
+            if not is_valid:
+                logger.info(f"Off-topic query detected (handled by LLM moderation): {user_input[:50]}...")
+            # Continue to router - let the LLM handle moderation via system prompts
 
     # Sticky routing: if we're already in a specialist flow and the user replies
     # with a short confirmation / continuation, keep the current area.
@@ -326,8 +409,12 @@ def _payment_agent_node(state: SupportState) -> SupportState:
     return {"messages": [response], "active_area": "payment"}
 
 
-def _route_after_router(state: SupportState) -> Area:
-    return state.get("active_area", "general")
+def _route_after_router(state: SupportState) -> Literal["general", "music", "account", "payment", END]:
+    area = state.get("active_area", "general")
+    # If guardrails blocked the request, route to END
+    if area == "__end__":
+        return END
+    return area
 
 
 def _agent_should_continue(state: SupportState) -> Literal["approval_gate", "tools", END]:
@@ -521,6 +608,7 @@ def _build_graph(*, with_checkpointer=False):
             "music": "music_agent",
             "account": "account_agent",
             "payment": "payment_agent",
+            END: END,
         },
     )
 

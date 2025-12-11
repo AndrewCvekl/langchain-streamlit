@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.types import Command
 
 from graph_with_verification import create_agent_with_memory
+from tracing import setup_langsmith_tracing
 
 
 def print_separator():
@@ -31,6 +32,9 @@ def main():
     """Run the interactive chatbot in the terminal."""
 
     load_dotenv()
+    
+    # Set up LangSmith tracing
+    setup_langsmith_tracing()
 
     print("=" * 60)
     print("🎵 Welcome to the Music Store Customer Support Bot! 🎵")

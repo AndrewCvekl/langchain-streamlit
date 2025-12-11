@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# Set up LangSmith tracing
+from tracing import setup_langsmith_tracing
+setup_langsmith_tracing()
+
 # Page config
 st.set_page_config(
     page_title="Music Store Support Bot (Secure)",
