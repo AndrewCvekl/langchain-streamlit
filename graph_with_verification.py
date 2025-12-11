@@ -283,9 +283,24 @@ def _payment_agent_node(state: SupportState) -> SupportState:
     
     # Check if user is responding with confirmation
     if messages and isinstance(messages[-1], HumanMessage):
-        last_user_msg = messages[-1].content.lower().strip()
+        last_content = messages[-1].content
+        # Handle both string and list content (multimodal support)
+        if isinstance(last_content, str):
+            last_user_msg = last_content.lower().strip()
+        elif isinstance(last_content, list) and last_content:
+            # Extract text from first text block if it's a list
+            first_block = last_content[0]
+            if isinstance(first_block, dict) and "text" in first_block:
+                last_user_msg = first_block["text"].lower().strip()
+            elif isinstance(first_block, str):
+                last_user_msg = first_block.lower().strip()
+            else:
+                last_user_msg = ""
+        else:
+            last_user_msg = ""
+        
         confirmations = ["yes", "y", "yeah", "yep", "sure", "ok", "okay", "confirm", "proceed", "buy", "purchase"]
-        if any(conf in last_user_msg for conf in confirmations) and track_info:
+        if last_user_msg and any(conf in last_user_msg for conf in confirmations) and track_info:
             system_messages.append(
                 SystemMessage(
                     content="[CONTEXT] User has confirmed purchase. Proceed with calling initiate_track_purchase."
