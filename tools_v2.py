@@ -415,33 +415,24 @@ def search_song_by_lyrics(lyrics_snippet: str) -> str:
         response.raise_for_status()
         data = response.json()
         
-        # Extract songs from response
+        # Extract songs from response - pick the first one (best match)
         hits = data.get('response', {}).get('hits', [])
         
         if not hits:
             return "No songs found matching those lyrics. Please try a different snippet."
         
-        results = []
-        for idx, hit in enumerate(hits[:5], 1):  # Top 5 results
-            if hit.get('type') == 'song':
-                result = hit.get('result', {})
-                artist_info = result.get('primary_artist', {})
-                
-                results.append({
-                    'rank': idx,
-                    'title': result.get('title', 'Unknown').strip(),
-                    'artist': artist_info.get('name', 'Unknown').strip()
-                })
-        
-        if not results:
+        # Get the first hit (best match)
+        first_hit = hits[0]
+        if first_hit.get('type') == 'song':
+            result = first_hit.get('result', {})
+            artist_info = result.get('primary_artist', {})
+            
+            title = result.get('title', 'Unknown').strip()
+            artist = artist_info.get('name', 'Unknown').strip()
+            
+            return f"Found: \"{title}\" by {artist}"
+        else:
             return "No songs found matching those lyrics."
-        
-        # Format the response
-        response_text = "Found these songs matching your lyrics:\n\n"
-        for song in results:
-            response_text += f"{song['rank']}. \"{song['title']}\" by {song['artist']}\n"
-        
-        return response_text
         
     except Exception as e:
         return f"Error searching for lyrics: {str(e)}"

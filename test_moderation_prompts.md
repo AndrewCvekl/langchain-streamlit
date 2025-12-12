@@ -78,3 +78,4 @@ I'm looking for a good recipe for chocolate chip cookies. Can you help?
 - **Before**: Code-level keyword blocking would immediately reject these
 - **After**: System prompts handle moderation with better context understanding
 - **Security**: Code-level validation still protects SQL injection and customer data isolation
+

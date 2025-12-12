@@ -42,3 +42,4 @@ def setup_langsmith_tracing():
     else:
         logger.info("ℹ️ LangSmith tracing disabled (set LANGCHAIN_TRACING_V2=true to enable)")
         return False
+
