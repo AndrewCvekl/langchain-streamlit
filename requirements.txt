@@ -23,3 +23,6 @@ requests>=2.31.0
 # External APIs
 twilio>=9.0.0
 google-api-python-client>=2.100.0
+
+# Streamlit (for sql-support-bot compatibility)
+streamlit>=1.28.0

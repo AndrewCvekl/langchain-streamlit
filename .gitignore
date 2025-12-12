@@ -1,3 +1,7 @@
+# Environment variables (DO NOT COMMIT!)
+.env
+.env.local
+
 # Python
 __pycache__/
 *.py[cod]
@@ -26,9 +30,11 @@ ENV/
 env/
 .venv/
 
-# Environment variables
-.env
-.env.local
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 
 # IDE
 .idea/
@@ -41,14 +47,12 @@ env/
 .DS_Store
 Thumbs.db
 
+# Jupyter
+.ipynb_checkpoints
+
 # Logs
 *.log
 logs/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
 
 # LangGraph
 .langgraph_api/
